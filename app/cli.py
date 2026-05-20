@@ -152,10 +152,12 @@ def main():
             filters = parse_filters(args.filter)
             knn_res = knn_search(storage, vector, args.k, filters=filters or None)
             subj = storage.get_subjective_vector()
+            subj_history = storage.get_subjective_history()
 
             result = filter_by_subjective_dynamics(
                 knn_res,
                 subj or [],
+                subj_history,
                 {"weight": args.weight, "threshold": args.threshold}
             )
             print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
