@@ -1,9 +1,8 @@
-import io
 import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -11,7 +10,7 @@ import pandas as pd
 from .storage import Storage
 
 
-def _validate_table_name(table: str):
+def _validate_table_name(table: str) -> None:
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
         raise ValueError("Invalid table name")
 
@@ -47,6 +46,7 @@ def _load_dataframe(file_path: str, table_name: Optional[str] = None) -> tuple[p
         if not table_name:
             raise ValueError("table_name is required for SQLite input")
         _validate_table_name(table_name)
+
         conn = sqlite3.connect(path)
         try:
             df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
@@ -57,7 +57,7 @@ def _load_dataframe(file_path: str, table_name: Optional[str] = None) -> tuple[p
     raise ValueError("Unsupported file type. Use CSV, JSON, or SQLite")
 
 
-def _normalize_dataframe(df: pd.DataFrame) -> np.ndarray:
+def _normalize_dataframe(df: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
     numeric_df = df.select_dtypes(include=["number"]).copy()
 
     if numeric_df.empty:
@@ -77,20 +77,46 @@ def _normalize_dataframe(df: pd.DataFrame) -> np.ndarray:
     denom[denom == 0.0] = 1.0
 
     normalized = (values - min_v) / denom
-    return normalized
+    return normalized, list(numeric_df.columns)
 
 
-def ingest_file(file_path: str, storage: Storage, table_name: Optional[str] = None) -> dict:
+def ingest_file(
+    file_path: str,
+    storage: Storage,
+    table_name: Optional[str] = None,
+    keep_columns: Optional[Sequence[str]] = None,
+) -> dict:
     df, source_type = _load_dataframe(file_path, table_name)
-    normalized = _normalize_dataframe(df)
+    keep_columns = list(keep_columns or [])
+
+    missing_keep_columns = [c for c in keep_columns if c not in df.columns]
+    if missing_keep_columns:
+        raise ValueError(f"Unknown keep_columns: {missing_keep_columns}")
+
+    numeric_df = df.select_dtypes(include=["number"]).copy()
+
+    if numeric_df.empty:
+        raise ValueError("No numeric columns found in input data")
+
+    normalized, used_feature_columns = _normalize_dataframe(numeric_df)
+
+    payloads = None
+    if keep_columns:
+        kept_df = df[keep_columns].copy()
+        payloads = kept_df.to_dict(orient="records")
 
     storage.clear_vectors()
-    storage.insert_vectors(normalized.tolist())
+    storage.insert_vectors(normalized.tolist(), payloads=payloads)
+
     storage.set_metadata("dimensions", json.dumps(int(normalized.shape[1])))
     storage.set_metadata("source_type", source_type)
+    storage.set_metadata("feature_columns", json.dumps(used_feature_columns))
+    storage.set_metadata("keep_columns", json.dumps(keep_columns))
 
     return {
         "rows_inserted": int(normalized.shape[0]),
         "dimensions": int(normalized.shape[1]),
-        "source_type": source_type
+        "source_type": source_type,
+        "feature_columns": used_feature_columns,
+        "keep_columns": keep_columns,
     }

@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 
 class Storage:
@@ -19,7 +19,8 @@ class Storage:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS vectors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    vector_json TEXT NOT NULL
+                    vector_json TEXT NOT NULL,
+                    payload_json TEXT
                 )
             """)
             conn.execute("""
@@ -42,11 +43,26 @@ class Storage:
             conn.execute("DELETE FROM vectors")
             conn.commit()
 
-    def insert_vectors(self, vectors: List[List[float]]):
+    def insert_vectors(
+        self,
+        vectors: List[List[float]],
+        payloads: Optional[List[Dict[str, Any]]] = None
+    ):
+        if payloads is not None and len(vectors) != len(payloads):
+            raise ValueError("vectors and payloads must have the same length")
+
         with self._connect() as conn:
+            if payloads is None:
+                data = [(json.dumps(v), None) for v in vectors]
+            else:
+                data = [
+                    (json.dumps(v), json.dumps(p, ensure_ascii=False))
+                    for v, p in zip(vectors, payloads)
+                ]
+
             conn.executemany(
-                "INSERT INTO vectors (vector_json) VALUES (?)",
-                [(json.dumps(v),) for v in vectors]
+                "INSERT INTO vectors (vector_json, payload_json) VALUES (?, ?)",
+                data
             )
             conn.commit()
 
@@ -54,6 +70,36 @@ class Storage:
         with self._connect() as conn:
             rows = conn.execute("SELECT id, vector_json FROM vectors ORDER BY id").fetchall()
             return [json.loads(row["vector_json"]) for row in rows]
+
+    def fetch_vectors_with_payloads(
+        self,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT id, vector_json, payload_json FROM vectors"
+        params: List[Any] = []
+        where_clauses: List[str] = []
+
+        if filters:
+            for key, value in filters.items():
+                where_clauses.append(f"json_extract(payload_json, '$.{key}') = ?")
+                params.append(value)
+
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+
+        query += " ORDER BY id"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            result = []
+            for row in rows:
+                payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+                result.append({
+                    "id": int(row["id"]),
+                    "vector": json.loads(row["vector_json"]),
+                    "payload": payload
+                })
+            return result
 
     def count_vectors(self) -> int:
         with self._connect() as conn:
